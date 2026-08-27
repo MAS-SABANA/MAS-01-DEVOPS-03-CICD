@@ -1,16 +1,23 @@
 # Laboratorio Técnico — Pipeline CI/CD con Seguridad y Monitoreo
 
-**Repositorio:** [https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD](https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD)
+**Repositorio:** [https://github.com/templatesSLA/agents-arq](https://github.com/templatesSLA/agents-arq)
 
-**Integrante:** Santiago López Amaya  
-**Curso:** Fundamentos de DevOps — Universidad de La Sabana  
-**Unidad:** 3 — Ecosistema DevOps: Herramientas para CI/CD y monitoreo
+**Integrantes:**
+
+| Nombre | Correo |
+|--------|--------|
+| Santiago López Amaya | [santiagoloam@unisabana.edu.co](mailto:santiagoloam@unisabana.edu.co) |
+| Jeisson Alejandro Fuquene Buitrago | [jeissonfubu@unisabana.edu.co](mailto:jeissonfubu@unisabana.edu.co) |
+
+**Curso:** Fundamentos de DevOps — Universidad de La Sabana · Unidad 3
 
 ---
 
 ## 1. Descripción del flujo CI/CD
 
 El pipeline está diseñado bajo el modelo de una sola rama larga (`main`) con ramas de corta duración (`feature/*`). La calidad del código se valida en el Pull Request mediante el pipeline de CI, y el despliegue ocurre automáticamente después del merge a `main` mediante el pipeline de CD.
+
+> **Diagrama de referencia:** [Arquitectura general](../diagrams/arquitectura.md) · [Flujo CI/CD detallado](../diagrams/cicd-flow.md) · [Secuencia de despliegue](../diagrams/secuencia-deploy.md)
 
 ### 1.1 Pipeline de Integración Continua (GitHub Actions — `ci.yml`)
 
@@ -36,6 +43,8 @@ La etapa de deploy utiliza `kubectl rollout status` con timeout de 120 segundos 
 
 ## 2. Herramientas utilizadas y justificación
 
+> **Diagrama de referencia:** [Arquitectura general — modelo de seguridad en capas](../diagrams/arquitectura.md)
+
 **GitHub Actions** fue elegido como motor de CI por su integración nativa con GitHub, su ecosistema de acciones reutilizables y la facilidad para configurar workflows en YAML. Su capacidad de ejecutar jobs en paralelo reduce significativamente el tiempo de feedback al desarrollador.
 
 **Jenkins** complementa el stack como motor de CD porque permite un control más granular del proceso de despliegue, integración con Kubernetes vía credenciales seguras y una UI rica para revisar el historial de pipelines. En entornos empresariales es común esta combinación: GitHub Actions para CI rápida y Jenkins para CD orquestado.
@@ -52,6 +61,8 @@ La etapa de deploy utiliza `kubectl rollout status` con timeout de 120 segundos 
 
 ## 3. Evidencia de seguridad
 
+> **Diagrama de referencia:** [Arquitectura general — modelo de seguridad](../diagrams/arquitectura.md)
+
 ### 3.1 SonarQube
 
 La configuración en `sonar-project.properties` define el proyecto con análisis de TypeScript, cobertura de tests vía LCOV y exclusiones para node_modules y archivos de test. El Quality Gate está configurado para fallar si la cobertura cae por debajo del 80% o se introducen bugs de severidad mayor.
@@ -65,6 +76,8 @@ El escaneo de dependencias se ejecuta en cada build. El archivo `.snyk` registra
 ---
 
 ## 4. Configuración de monitoreo
+
+> **Diagrama de referencia:** [K8s y monitoreo — stack completo y métricas](../diagrams/k8s-monitoreo.md)
 
 El stack de monitoreo (Prometheus + Grafana) se despliega en el namespace `monitoring` del cluster K8s. Prometheus descubre automáticamente los pods de la aplicación mediante las anotaciones `prometheus.io/scrape: "true"` definidas en el Deployment, sin necesidad de configuración manual por cada nuevo pod.
 
@@ -102,6 +115,11 @@ agents-arq/
 │   └── __tests__/
 │       ├── health.test.ts      # Tests del módulo health
 │       └── agents.test.ts      # Tests del módulo agents
+├── diagrams/
+│   ├── arquitectura.md         # Vista general del sistema
+│   ├── cicd-flow.md            # Detalle de pipelines CI y CD
+│   ├── k8s-monitoreo.md        # Stack K8s + Prometheus + Grafana
+│   └── secuencia-deploy.md     # Secuencia de interacción entre actores
 ├── k8s/
 │   ├── deployment.yaml         # Deployment K8s con probes y security context
 │   ├── service.yaml            # Service NodePort para minikube
@@ -129,7 +147,7 @@ agents-arq/
 
 ```bash
 # 1. Clonar e instalar
-git clone https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD && cd MAS-01-DEVOPS-03-CICD
+git clone https://github.com/templatesSLA/agents-arq && cd agents-arq
 npm ci
 
 # 2. Validar calidad
@@ -152,4 +170,8 @@ curl http://localhost:3000/metrics
 kubectl apply -f k8s/
 kubectl apply -f k8s/monitoring/
 minikube service agents-arq --url
+
+# 8. Acceder a Grafana
+minikube service grafana -n monitoring --url
+# Credenciales: admin / devops2024
 ```
