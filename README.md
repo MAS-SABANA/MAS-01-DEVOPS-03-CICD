@@ -1,109 +1,322 @@
-# agents-arq — Pipeline CI/CD con Seguridad y Monitoreo
+# Actividad 4 – Pipeline CI/CD con Seguridad y Monitoreo
 
-> **Repositorio:** [https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD](https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD)
+> **Curso:** Fundamentos de DevOps – Unisabana
+> **Tema:** CI/CD, seguridad (SonarQube + Snyk) y monitoreo (Prometheus + Grafana)
+> **Stack:** Node.js 24 · Express · TypeScript · Docker · Kubernetes · GitHub Actions · Jenkins
 
 **Integrantes:**
-
-| Nombre | Correo |
-|--------|--------|
-| Santiago López Amaya | [santiagoloam@unisabana.edu.co](mailto:santiagoloam@unisabana.edu.co) |
-| Jeisson Alejandro Fuquene Buitrago | [jeissonfubu@unisabana.edu.co](mailto:jeissonfubu@unisabana.edu.co) |
-
-**Curso:** Fundamentos de DevOps — Universidad de La Sabana · Unidad 3
-
----
-
-## Stack tecnológico
-
-| Capa | Herramienta |
-|------|-------------|
-| Aplicación | TypeScript + Express |
-| CI | GitHub Actions |
-| CD | Jenkins |
-| Análisis de código | SonarQube |
-| Seguridad de dependencias | Snyk |
-| Métricas | Prometheus + prom-client |
-| Dashboards | Grafana |
-| Contenedores | Docker (multi-stage) |
-| Orquestación | Kubernetes (Minikube) |
-
----
-
-## Diagramas
-
-Los diagramas están en la carpeta [`diagrams/`](diagrams/) e ilustran cada capa del sistema:
-
-| Diagrama | Descripción |
-|----------|-------------|
-| [Arquitectura general](diagrams/arquitectura.md) | Vista de alto nivel: developer → GitHub → CI/CD → K8s + monitoreo |
-| [Flujo CI/CD](diagrams/cicd-flow.md) | Jobs de GitHub Actions y stages de Jenkins detallados |
-| [K8s y monitoreo](diagrams/k8s-monitoreo.md) | Objetos Kubernetes, probes y stack Prometheus + Grafana |
-| [Secuencia de despliegue](diagrams/secuencia-deploy.md) | Interacción entre actores en el ciclo completo de deploy |
-
----
-
-## Inicio rápido
-
-```bash
-# Instalar dependencias
-npm ci
-
-# Validar calidad
-npm run typecheck && npm run lint && npm run test
-
-# Build de producción
-npm run build
-
-# Levantar con Docker
-docker build -t agents-arq:local .
-docker run -p 3000:3000 agents-arq:local
-
-# Verificar
-curl http://localhost:3000/health
-curl http://localhost:3000/metrics
-```
-
----
-
-## Endpoints
-
-| Método | Ruta | Descripción |
-|--------|------|-------------|
-| GET | `/health` | Liveness probe |
-| GET | `/health/ready` | Readiness probe |
-| GET | `/metrics` | Métricas Prometheus |
-| GET | `/agents` | Lista todos los agentes |
-| GET | `/agents/:id` | Agente por ID |
-| POST | `/agents` | Crear nuevo agente |
+- Santiago López Amaya — santiagoloam@unisabana.edu.co
+- Jeisson Alejandro Fuquene Buitrago — jeissonfubu@unisabana.edu.co
 
 ---
 
 ## Estructura del repositorio
 
 ```
-agents-arq/
-├── .github/workflows/ci.yml     # Pipeline CI — GitHub Actions
+04_actividad/
 ├── src/
-│   ├── index.ts                 # Entry point
-│   ├── metrics.ts               # Métricas Prometheus
-│   ├── routes/health.ts         # Liveness + readiness
-│   ├── routes/agents.ts         # CRUD de agentes
-│   └── __tests__/               # Tests con Supertest
+│   ├── index.ts                    # Entry point — servidor Express + métricas
+│   ├── metrics.ts                  # prom-client: counters, histograms, gauges
+│   ├── routes/
+│   │   ├── health.ts               # GET /health · GET /health/ready
+│   │   └── agents.ts               # CRUD /agents
+│   └── __tests__/
+│       ├── health.test.ts
+│       └── agents.test.ts
 ├── k8s/
-│   ├── deployment.yaml          # Deployment + probes + security context
-│   ├── service.yaml             # Service NodePort
+│   ├── deployment.yaml             # Deployment + liveness/readiness probes
+│   ├── service.yaml                # Service NodePort :30080
 │   ├── configmap.yaml
-│   └── monitoring/              # Prometheus + Grafana
-├── diagrams/                    # Diagramas Mermaid del sistema
-├── docs/informe-tecnico.md      # Documento técnico del laboratorio
-├── Dockerfile                   # Multi-stage (build → runtime mínimo)
-├── Jenkinsfile                  # Pipeline CD — Jenkins declarativo
-├── sonar-project.properties     # Configuración SonarQube
-└── package.json
+│   └── monitoring/
+│       ├── prometheus-config.yaml  # Prometheus + reglas de alerta
+│       └── grafana-deployment.yaml # Grafana + dashboard auto-provisioned
+├── diagrams/
+│   ├── arquitectura.md             # Vista general del sistema
+│   ├── cicd-flow.md                # Detalle de pipelines CI y CD
+│   ├── k8s-monitoreo.md            # Stack K8s + Prometheus + Grafana
+│   └── secuencia-deploy.md         # Secuencia completa de despliegue
+├── docs/
+│   └── informe-tecnico.md          # Documento técnico del laboratorio
+├── Dockerfile                      # Multi-stage build (build → runtime mínimo)
+├── Jenkinsfile                     # Pipeline CD — solo despliegue
+├── sonar-project.properties        # Configuración SonarQube
+└── .github/workflows/ci.yml        # Pipeline CI — calidad + seguridad + imagen
 ```
 
 ---
 
-## Documentación técnica
+## Arquitectura general
 
-Ver [`docs/informe-tecnico.md`](docs/informe-tecnico.md) para la descripción completa del flujo CI/CD, herramientas utilizadas, evidencias de seguridad y monitoreo, y reflexión sobre eficiencia operativa.
+El sistema implementa un ciclo DevOps completo donde cada herramienta cumple un rol específico y encadenado. El developer hace push a GitHub, lo que desencadena dos flujos paralelos pero coordinados: el **CI** (GitHub Actions) que valida la calidad del código, ejecuta los análisis de seguridad y publica la imagen Docker; y el **CD** (Jenkins) que, una vez que la imagen está en el registry, la despliega en el cluster de Kubernetes. El usuario final accede a la aplicación a través del Service de K8s, mientras que el stack de monitoreo (Prometheus + Grafana) observa en tiempo real lo que ocurre dentro de los pods.
+
+La separación entre CI y CD es intencional: GitHub Actions tiene acceso a los secretos de análisis (SonarQube, Snyk, Docker Hub) mientras que Jenkins solo necesita el kubeconfig del cluster. Esto reduce la superficie de ataque y permite que cada pipeline evolucione de forma independiente.
+
+```mermaid
+graph LR
+  DEV(["👨‍💻 Developer"])
+
+  subgraph GH["GitHub"]
+    REPO["📁 agents-arq"]
+    GA["⚙️ GitHub Actions\n(CI)"]
+  end
+
+  REG[("🐳 Docker Hub\nagents-arq:SHA")]
+
+  subgraph JK["Jenkins (CD)"]
+    JD["🚀 Deploy\nkubectl set image"]
+  end
+
+  subgraph K8S["Kubernetes · Minikube"]
+    APP["🚀 agents-arq\nPod × 2"]
+    SVC["🔀 Service :30080"]
+    SVC -->|"enruta"| APP
+  end
+
+  subgraph MON["Monitoreo"]
+    PROM["📈 Prometheus"]
+    GRAF["📊 Grafana :30030"]
+    PROM -->|"datasource"| GRAF
+  end
+
+  USR(["🌐 Usuario"])
+
+  DEV    -->|"git push"| REPO
+  REPO   -->|"trigger CI"| GA
+  GA     -->|"docker push :SHA"| REG
+  REPO   -->|"webhook post-merge"| JK
+  JD     -->|"pull imagen"| REG
+  JD     -->|"deploy"| K8S
+  APP    -->|"/metrics"| PROM
+  USR    -->|"HTTP"| SVC
+```
+
+Ver detalle en [`diagrams/arquitectura.md`](./diagrams/arquitectura.md).
+
+---
+
+## Pipeline CI – GitHub Actions
+
+El CI se activa en cada push a `feature/**` y en PRs hacia `main`, funcionando como **guardián de calidad antes del merge**. Está compuesto por cuatro jobs en secuencia estricta: si el Quality Gate falla, SonarQube y Snyk ni siquiera arrancan, evitando consumo innecesario de recursos. SonarQube y Snyk corren en paralelo entre sí, ya que son independientes. El job de Docker solo se ejecuta cuando el evento es un merge real a `main`, no en PRs, garantizando que solo el código aprobado por revisión humana y por los tres gates automáticos llega al registry.
+
+```mermaid
+flowchart LR
+  push(["push / PR"]) --> quality
+
+  subgraph quality["Job: Quality Gate"]
+    q1[typecheck] --> q2[lint] --> q3[tests] --> q4[build]
+  end
+
+  quality --> sonar & snyk
+
+  subgraph sonar["Job: SonarQube"]
+    s1[análisis estático] --> s2{quality gate}
+  end
+
+  subgraph snyk["Job: Snyk"]
+    n1[escaneo deps] --> n2[upload SARIF]
+  end
+
+  sonar & snyk --> docker
+
+  subgraph docker["Job: Docker\n(solo merge a main)"]
+    d1[build imagen] --> d2[push :SHA · :latest]
+  end
+
+  docker --> done(["✅ Imagen en Docker Hub"])
+```
+
+Ver detalle completo en [`diagrams/cicd-flow.md`](./diagrams/cicd-flow.md).
+
+### Evidencia de ejecución
+
+El flujo real de trabajo es: rama `feature/*` → Pull Request hacia `main` → merge. Cada push a un PR abierto dispara el CI vía el evento `pull_request` (no `push`, para evitar runs duplicados sobre el mismo commit):
+
+![Flujo de ramas: feature branch → PR → merge a main](images/git-branch-graph.png)
+
+El bot **sonarqubecloud** comenta directamente en el Pull Request el resultado del Quality Gate (issues nuevos, hotspots de seguridad, cobertura y duplicación sobre el código nuevo), y GitHub bloquea el botón de merge hasta que todos los checks — incluido ese — pasan:
+
+![PR #1 con comentario del bot sonarqubecloud: Quality Gate passed, y todos los checks en verde](images/ci-pr-quality-gate.png)
+
+Ese run se disparó por un evento `pull_request` de tipo **`synchronize`** (un push a una rama que ya tiene PR abierto) — exactamente el escenario que causaba runs duplicados antes de quitar `feature/**` del trigger `push` en `ci.yml`. Ejecuta Quality Gate → SonarQube + Snyk en paralelo. El job `Docker Build & Push` aparece omitido (ícono de círculo cortado) porque la condición `if` del job exige que el evento sea `push` a `main` — es decir, que ya haya merge:
+
+![Job graph del run disparado por el PR: Quality Gate, SonarQube y Snyk en verde, Docker omitido](images/ci-run-pr.png)
+
+Vista de la barra lateral del mismo run, confirmando el estado de cada job (`Docker Build & Push` con el ícono de omitido):
+
+![Barra lateral de jobs del run: Quality Gate, SonarQube Analysis y Snyk Security Scan con check verde, Docker Build & Push omitido](images/ci-run-pr-jobs-sidebar.png)
+
+Al hacer merge del PR, el push resultante a `main` dispara una **segunda** ejecución del mismo workflow — ahora sí con el evento `push` correcto:
+
+![Lista de runs: el disparado por el PR ya terminó, el disparado por el push a main tras el merge queda en progreso](images/actions-runs-list-merge.png)
+
+En esa segunda corrida el job `Docker Build & Push` sí se ejecuta, construye la imagen multi-stage y la publica en Docker Hub:
+
+![Job graph completo tras el merge: los cuatro jobs en verde, incluido Docker Build & Push, con el resumen del build](images/ci-run-merge-docker.png)
+
+Resultado final: la imagen publicada en Docker Hub con las tags generadas automáticamente por `docker/metadata-action` (SHA del commit, `main`, `latest`):
+
+![Repositorio santilp951/agents-arq en Docker Hub con las tags sha-6618c13, latest y main](images/dockerhub-tags.png)
+
+---
+
+## Pipeline CD – Jenkins
+
+El CD se dispara por webhook al detectar un merge a `main`. Su única responsabilidad es tomar la imagen ya validada y publicada por el CI y llevarla al cluster. No repite ningún paso de calidad ni seguridad: confía en que el CI ya hizo ese trabajo. El `kubectl rollout status` actúa como verificación de disponibilidad real — si los pods no pasan las readiness probes en 120 segundos, Kubernetes mantiene automáticamente la versión anterior activa.
+
+```mermaid
+flowchart LR
+  webhook(["webhook\nmerge a main"]) --> checkout
+
+  subgraph checkout["Checkout"]
+    c1[git clone]
+  end
+
+  checkout --> deploy
+
+  subgraph deploy["Deploy a K8s"]
+    d1[kubectl set image\n:SHA] --> d2[rollout status\ntimeout 120s]
+  end
+
+  deploy --> smoke
+
+  subgraph smoke["Smoke Test"]
+    sm1[curl /health] --> sm2{200 OK?}
+  end
+
+  sm2 -->|"sí"| ok(["✅ Deploy exitoso"])
+  sm2 -->|"no"| fail(["❌ K8s revierte\nversión anterior"])
+```
+
+---
+
+## Seguridad
+
+| Herramienta | Qué analiza | Cuándo |
+|-------------|-------------|--------|
+| SonarQube | Código fuente: bugs, deuda técnica, cobertura | Job CI post-tests |
+| Snyk | Dependencias npm: CVEs conocidos | Job CI paralelo a SonarQube |
+| Docker multi-stage | Imagen mínima sin devDeps ni código fuente | Build CI |
+| K8s security context | Usuario no-root, readOnlyRootFilesystem, no capabilities | Deploy CD |
+
+**SonarQube Cloud** — proyecto `MAS-SABANA_MAS-01-DEVOPS-03-CICD`, Quality Gate en verde, sin issues de seguridad ni bugs, 91% de cobertura y 0% de duplicación:
+
+![Dashboard de SonarQube Cloud: Quality Gate Passed, Security A, Reliability A, Maintainability A, 91% coverage](images/sonarcloud-dashboard.png)
+
+**Snyk** — el job de CI corre `snyk test` (gate que falla el build ante vulnerabilidades `high`/`critical`) y, solo en push a `main`, `snyk monitor`, que publica este snapshot en el dashboard: 97 dependencias analizadas, 0 issues encontrados:
+
+![Dashboard de Snyk: proyecto agents-arq, 0 issues, 97 dependencias, snapshot vía CI/CLI](images/snyk-dashboard.png)
+
+---
+
+## Monitoreo
+
+El stack Prometheus + Grafana se despliega en el namespace `monitoring`. La app expone `/metrics` vía `prom-client` y los pods son descubiertos automáticamente por las anotaciones del Deployment. Prometheus evalúa reglas de alerta (`HighErrorRate`, `HighLatency`, `PodDown`) y alimenta como datasource a Grafana, que carga el dashboard `agents-arq-main` de forma automática desde un ConfigMap — sin configuración manual al arrancar.
+
+```mermaid
+graph LR
+  subgraph APP["namespace: default"]
+    POD["🚀 agents-arq Pod"]
+    MET["/metrics · prom-client"]
+    POD -->|"expone"| MET
+  end
+
+  subgraph MON["namespace: monitoring"]
+    PROM["📈 Prometheus\nNodePort :30090"]
+    ALERTS["🚨 Alertas\nHighErrorRate · HighLatency · PodDown"]
+    GRAF["📊 Grafana\nNodePort :30030"]
+    DASH["🗂️ Dashboard\nagents-arq-main"]
+    PROM -->|"evalúa reglas"| ALERTS
+    PROM -->|"datasource"| GRAF
+    GRAF -->|"auto-provisioned"| DASH
+  end
+
+  MET  -->|"scrape cada 10s"| PROM
+  DEV(["👨‍💻 DevOps"])
+  DEV  -->|"visualiza"| GRAF
+```
+
+Ver detalle completo en [`diagrams/k8s-monitoreo.md`](./diagrams/k8s-monitoreo.md).
+
+```bash
+# Acceder a Grafana en minikube
+minikube service grafana -n monitoring --url
+# Credenciales: admin / devops2024
+```
+
+---
+
+## Desarrollo local
+
+Para correr el proyecto en local sin necesidad de un cluster ni de las herramientas de CI/CD:
+
+**Requisitos previos**
+
+| Herramienta | Versión mínima |
+|-------------|----------------|
+| Node.js | 24+ |
+| Docker | 24+ |
+| kubectl | 1.28+ |
+| Minikube | cualquiera |
+
+**Levantar la app en modo desarrollo**
+
+```bash
+# Clonar e instalar dependencias
+git clone https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD
+cd MAS-01-DEVOPS-03-CICD
+npm ci
+
+# Validar el código antes de tocar nada
+npm run typecheck
+npm run lint
+npm run test        # incluye cobertura
+
+# Levantar con hot-reload (ts-node)
+npm run dev
+# → http://localhost:3000/health
+# → http://localhost:3000/metrics
+# → http://localhost:3000/agents
+```
+
+**Levantar con Docker (simula producción)**
+
+```bash
+docker build -t agents-arq:local .
+docker run --rm -p 3000:3000 agents-arq:local
+
+# Verificar que el health check del contenedor responde
+curl http://localhost:3000/health
+```
+
+**Desplegar en Minikube con monitoreo**
+
+```bash
+minikube start
+
+# Crear namespace de monitoreo y aplicar manifiestos
+kubectl create namespace monitoring
+kubectl apply -f k8s/
+kubectl apply -f k8s/monitoring/
+
+# Verificar que los pods están corriendo
+kubectl get pods
+kubectl get pods -n monitoring
+
+# Acceder a la app
+minikube service agents-arq --url
+
+# Acceder a Grafana (admin / devops2024)
+minikube service grafana -n monitoring --url
+```
+
+---
+
+## Secrets requeridos en GitHub
+
+| Secret | Valor |
+|--------|-------|
+| `SONAR_TOKEN` | Token de autenticación SonarQube |
+| `SONAR_HOST_URL` | URL del servidor SonarQube |
+| `SNYK_TOKEN` | Token de Snyk |
+| `DOCKERHUB_USERNAME` | Usuario de Docker Hub |
+| `DOCKERHUB_TOKEN` | Token de acceso Docker Hub |
