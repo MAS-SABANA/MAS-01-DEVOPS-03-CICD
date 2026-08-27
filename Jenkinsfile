@@ -1,198 +1,117 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// Jenkinsfile — Pipeline CD declarativo para agents-arq
-// Ejecuta después del merge a main (disparado por webhook de GitHub)
+// Jenkinsfile — Pipeline de CD para agents-arq
+//
+// El CI (tests, calidad, análisis y build/push de la imagen) lo hace GitHub
+// Actions. Este pipeline SOLO despliega en GKE Autopilot: fija el tag en el
+// manifiesto y aplica k8s/gke-autopilot/ contra el clúster.
+//
+// Se dispara desde GitHub Actions (tras publicar la imagen) pasando IMAGE_TAG.
 // ─────────────────────────────────────────────────────────────────────────────
 pipeline {
     agent {
         docker {
-            image 'node:20-alpine'
+            // Mirror en Docker Hub de gcr.io/google.com/cloudsdktool/google-cloud-cli
+            // Incluye git + gcloud + kubectl + gke-gcloud-auth-plugin
+            image 'google/cloud-sdk:latest'
             args '-u root'
         }
     }
 
+    parameters {
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: 'latest',
+            description: 'Tag de la imagen agents-arq ya publicada por GitHub Actions (p.ej. sha-a28d2cf)'
+        )
+    }
+
     environment {
-        APP_NAME        = 'agents-arq'
-        IMAGE_REGISTRY  = 'docker.io'
-        IMAGE_REPO      = "${DOCKERHUB_USERNAME}/${APP_NAME}"
-        IMAGE_TAG       = "${GIT_COMMIT[0..7]}"
-        KUBECONFIG_FILE = credentials('kubeconfig-minikube')
-        DOCKERHUB_CRED  = credentials('dockerhub-credentials')
-        SONAR_TOKEN     = credentials('sonar-token')
-        SNYK_TOKEN      = credentials('snyk-token')
+        APP_NAME     = 'agents-arq'
+        // Ajusta al repositorio real de Docker Hub
+        IMAGE_REPO   = 'santilp951/agents-arq'
+        IMAGE_REF    = "santilp951/agents-arq:${params.IMAGE_TAG}"
+
+        K8S_DIR      = 'k8s/gke-autopilot'
+        GKE_CLUSTER  = 'demo-observability'
+        GKE_LOCATION = 'us-central1'
+
+        USE_GKE_GCLOUD_AUTH_PLUGIN    = 'True'
+        CLOUDSDK_CORE_DISABLE_PROMPTS = '1'
     }
 
     options {
-        buildDiscarder(logRotator(numToKeepStr: '10'))
-        timeout(time: 30, unit: 'MINUTES')
+        buildDiscarder(logRotator(numToKeepStr: '20'))
+        timeout(time: 15, unit: 'MINUTES')
         disableConcurrentBuilds()
         timestamps()
     }
 
     stages {
-        // ─── Stage 1: Checkout ────────────────────────────────────────────────
+        // ─── Stage 1: Checkout ───────────────────────────────────────────────
         stage('Checkout') {
             steps {
                 checkout scm
-                echo "📦 Commit: ${GIT_COMMIT} | Branch: ${GIT_BRANCH}"
+                echo "CD de ${IMAGE_REF} → clúster ${GKE_CLUSTER} (${GKE_LOCATION})"
             }
         }
 
-        // ─── Stage 2: Dependencias ────────────────────────────────────────────
-        stage('Instalar dependencias') {
+        // ─── Stage 2: Autenticar en GKE ──────────────────────────────────────
+        stage('Autenticar en GKE') {
             steps {
-                sh 'npm ci'
-            }
-        }
-
-        // ─── Stage 3: Calidad de código ───────────────────────────────────────
-        stage('Calidad de código') {
-            parallel {
-                stage('TypeCheck') {
-                    steps {
-                        sh 'npm run typecheck'
-                    }
-                }
-                stage('Lint') {
-                    steps {
-                        sh 'npm run lint'
-                    }
+                withCredentials([
+                    file(credentialsId: 'gcp-sa-key', variable: 'GCP_SA_KEY'),
+                    string(credentialsId: 'gcp-project-id', variable: 'GCP_PROJECT')
+                ]) {
+                    sh '''
+                        set -eu
+                        gcloud auth activate-service-account --key-file="$GCP_SA_KEY"
+                        gcloud container clusters get-credentials "$GKE_CLUSTER" \
+                          --location "$GKE_LOCATION" \
+                          --project "$GCP_PROJECT"
+                    '''
                 }
             }
         }
 
-        // ─── Stage 4: Tests ───────────────────────────────────────────────────
-        stage('Tests') {
-            environment {
-                NODE_ENV = 'test'
-            }
+        // ─── Stage 3: Deploy a GKE Autopilot ─────────────────────────────────
+        stage('Deploy a GKE Autopilot') {
             steps {
-                sh 'npm run test:ci'
-                junit 'junit.xml'
-                publishHTML(target: [
-                    allowMissing: false,
-                    alwaysLinkToLastBuild: true,
-                    keepAll: true,
-                    reportDir: 'coverage',
-                    reportFiles: 'index.html',
-                    reportName: 'Cobertura de código'
-                ])
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'coverage/**', fingerprint: true
-                }
+                sh '''
+                    set -eu
+
+                    # Infra de monitoreo — idempotente, no depende del tag
+                    kubectl apply -f "$K8S_DIR/namespace.yaml"
+                    kubectl apply -f "$K8S_DIR/prometheus.yaml"
+                    kubectl apply -f "$K8S_DIR/grafana.yaml"
+
+                    # App — se sustituye el placeholder __IMAGE__ por el tag recibido
+                    sed "s#__IMAGE__#${IMAGE_REF}#g" "$K8S_DIR/app.yaml" | kubectl apply -f -
+
+                    kubectl -n default    rollout status deployment/"$APP_NAME" --timeout=180s
+                    kubectl -n monitoring rollout status deployment/prometheus  --timeout=180s
+                    kubectl -n monitoring rollout status deployment/grafana     --timeout=180s
+                '''
             }
         }
 
-        // ─── Stage 5: Análisis SonarQube ──────────────────────────────────────
-        stage('SonarQube Analysis') {
-            steps {
-                withSonarQubeEnv('sonarqube-server') {
-                    sh """
-                        npx sonar-scanner \
-                          -Dsonar.projectKey=${APP_NAME} \
-                          -Dsonar.sources=src \
-                          -Dsonar.exclusions=**/node_modules/**,**/__tests__/** \
-                          -Dsonar.javascript.lcov.reportPaths=coverage/lcov.info \
-                          -Dsonar.token=${SONAR_TOKEN}
-                    """
-                }
-            }
-        }
-
-        // ─── Stage 6: Quality Gate SonarQube ──────────────────────────────────
-        stage('Quality Gate') {
-            steps {
-                timeout(time: 5, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
-                }
-            }
-        }
-
-        // ─── Stage 7: Snyk Security Scan ──────────────────────────────────────
-        stage('Snyk Security') {
-            steps {
-                sh """
-                    npm install -g snyk
-                    snyk auth ${SNYK_TOKEN}
-                    snyk test --severity-threshold=high --json > snyk-report.json || true
-                    snyk monitor
-                """
-                archiveArtifacts artifacts: 'snyk-report.json', fingerprint: true
-            }
-        }
-
-        // ─── Stage 8: Build ───────────────────────────────────────────────────
-        stage('Build') {
-            steps {
-                sh 'npm run build'
-                archiveArtifacts artifacts: 'dist/**', fingerprint: true
-            }
-        }
-
-        // ─── Stage 9: Docker Build & Push ─────────────────────────────────────
-        stage('Docker Build & Push') {
-            steps {
-                script {
-                    docker.withRegistry("https://${IMAGE_REGISTRY}", 'dockerhub-credentials') {
-                        def image = docker.build(
-                            "${IMAGE_REPO}:${IMAGE_TAG}",
-                            "--build-arg APP_VERSION=${GIT_COMMIT} ."
-                        )
-                        image.push()
-                        image.push('latest')
-                    }
-                }
-            }
-        }
-
-        // ─── Stage 10: Deploy a Kubernetes (Minikube) ─────────────────────────
-        stage('Deploy a K8s') {
-            steps {
-                withCredentials([file(credentialsId: 'kubeconfig-minikube', variable: 'KUBECONFIG')]) {
-                    sh """
-                        # Actualizar la imagen en el deployment
-                        kubectl set image deployment/${APP_NAME} \
-                          ${APP_NAME}=${IMAGE_REPO}:${IMAGE_TAG} \
-                          --namespace=default
-
-                        # Verificar rollout
-                        kubectl rollout status deployment/${APP_NAME} \
-                          --namespace=default \
-                          --timeout=120s
-                    """
-                }
-            }
-        }
-
-        // ─── Stage 11: Smoke Test post-deploy ─────────────────────────────────
+        // ─── Stage 4: Smoke Test post-deploy ─────────────────────────────────
         stage('Smoke Test') {
             steps {
-                withCredentials([file(credentialsId: 'kubeconfig-minikube', variable: 'KUBECONFIG')]) {
-                    sh """
-                        # Obtener la URL del servicio en minikube
-                        SERVICE_URL=\$(kubectl get svc ${APP_NAME} \
-                          -o jsonpath='{.spec.clusterIP}:{.spec.ports[0].port}')
-
-                        # Esperar a que el pod esté listo
-                        sleep 10
-
-                        # Verificar health endpoint
-                        curl --fail http://\${SERVICE_URL}/health || exit 1
-                        echo "✅ Smoke test superado — /health responde correctamente"
-                    """
-                }
+                sh '''
+                    set -eu
+                    kubectl -n default exec deploy/"$APP_NAME" -- wget -qO- http://localhost:3000/health
+                    echo "OK: $IMAGE_REF desplegado y /health responde"
+                '''
             }
         }
     }
 
-    // ─── Post-pipeline ────────────────────────────────────────────────────────
     post {
         success {
-            echo "✅ Pipeline completado exitosamente — ${APP_NAME}:${IMAGE_TAG} desplegado"
+            echo "✅ CD completado — ${IMAGE_REF} desplegado en ${GKE_CLUSTER}"
         }
         failure {
-            echo "❌ Pipeline fallido en stage: ${currentBuild.currentResult}"
+            echo "❌ CD fallido (${currentBuild.currentResult})"
         }
         always {
             cleanWs()
