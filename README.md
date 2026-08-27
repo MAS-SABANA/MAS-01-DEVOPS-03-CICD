@@ -48,7 +48,9 @@
 
 ## Arquitectura general
 
-Ver detalle en [`diagrams/arquitectura.md`](./diagrams/arquitectura.md).
+El sistema implementa un ciclo DevOps completo donde cada herramienta cumple un rol específico y encadenado. El developer hace push a GitHub, lo que desencadena dos flujos paralelos pero coordinados: el **CI** (GitHub Actions) que valida la calidad del código, ejecuta los análisis de seguridad y publica la imagen Docker; y el **CD** (Jenkins) que, una vez que la imagen está en el registry, la despliega en el cluster de Kubernetes. El usuario final accede a la aplicación a través del Service de K8s, mientras que el stack de monitoreo (Prometheus + Grafana) observa en tiempo real lo que ocurre dentro de los pods.
+
+La separación entre CI y CD es intencional: GitHub Actions tiene acceso a los secretos de análisis (SonarQube, Snyk, Docker Hub) mientras que Jenkins solo necesita el kubeconfig del cluster. Esto reduce la superficie de ataque y permite que cada pipeline evolucione de forma independiente.
 
 ```mermaid
 graph LR
@@ -89,11 +91,13 @@ graph LR
   USR    -->|"HTTP"| SVC
 ```
 
+Ver detalle en [`diagrams/arquitectura.md`](./diagrams/arquitectura.md).
+
 ---
 
 ## Pipeline CI – GitHub Actions
 
-El workflow en `.github/workflows/ci.yml` se dispara en cada push a `feature/**` y en PRs hacia `main`. Cuatro jobs en secuencia: calidad de código → SonarQube → Snyk → Docker build & push (solo al hacer merge a `main`).
+El CI se activa en cada push a `feature/**` y en PRs hacia `main`, funcionando como **guardián de calidad antes del merge**. Está compuesto por cuatro jobs en secuencia estricta: si el Quality Gate falla, SonarQube y Snyk ni siquiera arrancan, evitando consumo innecesario de recursos. SonarQube y Snyk corren en paralelo entre sí, ya que son independientes. El job de Docker solo se ejecuta cuando el evento es un merge real a `main`, no en PRs, garantizando que solo el código aprobado por revisión humana y por los tres gates automáticos llega al registry.
 
 ```mermaid
 flowchart LR
@@ -128,7 +132,7 @@ Ver detalle completo en [`diagrams/cicd-flow.md`](./diagrams/cicd-flow.md).
 
 ## Pipeline CD – Jenkins
 
-El `Jenkinsfile` se dispara por webhook al detectar merge a `main`. Toma la imagen ya publicada por el CI y la despliega en el cluster K8s.
+El CD se dispara por webhook al detectar un merge a `main`. Su única responsabilidad es tomar la imagen ya validada y publicada por el CI y llevarla al cluster. No repite ningún paso de calidad ni seguridad: confía en que el CI ya hizo ese trabajo. El `kubectl rollout status` actúa como verificación de disponibilidad real — si los pods no pasan las readiness probes en 120 segundos, Kubernetes mantiene automáticamente la versión anterior activa.
 
 ```mermaid
 flowchart LR
@@ -169,9 +173,32 @@ flowchart LR
 
 ## Monitoreo
 
-El stack Prometheus + Grafana se despliega en el namespace `monitoring`. La app expone `/metrics` vía `prom-client` y los pods son descubiertos automáticamente por las anotaciones del Deployment.
+El stack Prometheus + Grafana se despliega en el namespace `monitoring`. La app expone `/metrics` vía `prom-client` y los pods son descubiertos automáticamente por las anotaciones del Deployment. Prometheus evalúa reglas de alerta (`HighErrorRate`, `HighLatency`, `PodDown`) y alimenta como datasource a Grafana, que carga el dashboard `agents-arq-main` de forma automática desde un ConfigMap — sin configuración manual al arrancar.
 
-Ver detalle en [`diagrams/k8s-monitoreo.md`](./diagrams/k8s-monitoreo.md).
+```mermaid
+graph LR
+  subgraph APP["namespace: default"]
+    POD["🚀 agents-arq Pod"]
+    MET["/metrics · prom-client"]
+    POD -->|"expone"| MET
+  end
+
+  subgraph MON["namespace: monitoring"]
+    PROM["📈 Prometheus\nNodePort :30090"]
+    ALERTS["🚨 Alertas\nHighErrorRate · HighLatency · PodDown"]
+    GRAF["📊 Grafana\nNodePort :30030"]
+    DASH["🗂️ Dashboard\nagents-arq-main"]
+    PROM -->|"evalúa reglas"| ALERTS
+    PROM -->|"datasource"| GRAF
+    GRAF -->|"auto-provisioned"| DASH
+  end
+
+  MET  -->|"scrape cada 10s"| PROM
+  DEV(["👨‍💻 DevOps"])
+  DEV  -->|"visualiza"| GRAF
+```
+
+Ver detalle completo en [`diagrams/k8s-monitoreo.md`](./diagrams/k8s-monitoreo.md).
 
 ```bash
 # Acceder a Grafana en minikube
@@ -181,23 +208,68 @@ minikube service grafana -n monitoring --url
 
 ---
 
-## Inicio rápido
+## Desarrollo local
+
+Para correr el proyecto en local sin necesidad de un cluster ni de las herramientas de CI/CD:
+
+**Requisitos previos**
+
+| Herramienta | Versión mínima |
+|-------------|----------------|
+| Node.js | 24+ |
+| Docker | 24+ |
+| kubectl | 1.28+ |
+| Minikube | cualquiera |
+
+**Levantar la app en modo desarrollo**
 
 ```bash
-# Instalar y validar
+# Clonar e instalar dependencias
+git clone https://github.com/templatesSLA/agents-arq
+cd agents-arq
 npm ci
-npm run typecheck && npm run lint && npm run test
 
-# Docker local
+# Validar el código antes de tocar nada
+npm run typecheck
+npm run lint
+npm run test        # incluye cobertura
+
+# Levantar con hot-reload (ts-node)
+npm run dev
+# → http://localhost:3000/health
+# → http://localhost:3000/metrics
+# → http://localhost:3000/agents
+```
+
+**Levantar con Docker (simula producción)**
+
+```bash
 docker build -t agents-arq:local .
-docker run -p 3000:3000 agents-arq:local
-curl http://localhost:3000/health
-curl http://localhost:3000/metrics
+docker run --rm -p 3000:3000 agents-arq:local
 
-# Desplegar en minikube
+# Verificar que el health check del contenedor responde
+curl http://localhost:3000/health
+```
+
+**Desplegar en Minikube con monitoreo**
+
+```bash
+minikube start
+
+# Crear namespace de monitoreo y aplicar manifiestos
+kubectl create namespace monitoring
 kubectl apply -f k8s/
 kubectl apply -f k8s/monitoring/
+
+# Verificar que los pods están corriendo
+kubectl get pods
+kubectl get pods -n monitoring
+
+# Acceder a la app
 minikube service agents-arq --url
+
+# Acceder a Grafana (admin / devops2024)
+minikube service grafana -n monitoring --url
 ```
 
 ---
