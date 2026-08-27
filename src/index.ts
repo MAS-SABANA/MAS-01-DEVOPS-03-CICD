@@ -10,6 +10,7 @@ import agentsRouter from './routes/agents';
 const app = express();
 const PORT = parseInt(process.env['PORT'] ?? '3000', 10);
 
+
 // Middleware
 app.use(express.json());
 
