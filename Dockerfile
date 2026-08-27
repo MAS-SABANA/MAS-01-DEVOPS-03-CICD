@@ -27,7 +27,7 @@ FROM node:20-alpine AS runtime
 # Metadatos OCI
 LABEL org.opencontainers.image.title="agents-arq" \
       org.opencontainers.image.description="API REST de arquitectura de agentes — Unisabana DevOps" \
-      org.opencontainers.image.source="https://github.com/templatesSLA/agents-arq"
+      org.opencontainers.image.source="https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD"
 
 WORKDIR /app
 

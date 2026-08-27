@@ -7,7 +7,6 @@ coverage
 *.log
 .eslintrc.json
 jest.config.ts
-tsconfig.json
 Jenkinsfile
 k8s/
 docs/
