@@ -6,6 +6,14 @@
 pipeline {
     agent any
 
+    parameters {
+        string(
+            name: 'IMAGE_TAG',
+            defaultValue: 'latest',
+            description: 'Tag de la imagen agents-arq ya publicada por GitHub Actions (p.ej. sha-a28d2cf)'
+        )
+    }
+
     environment {
         APP_NAME    = 'agents-arq'
         IMAGE_REPO  = "${env.DOCKERHUB_USERNAME}/${APP_NAME}"
@@ -20,7 +28,7 @@ pipeline {
     }
 
     stages {
-        // ─── Stage 1: Checkout ────────────────────────────────────────────────
+        // ─── Stage 1: Checkout ───────────────────────────────────────────────
         stage('Checkout') {
             steps {
                 checkout scm
