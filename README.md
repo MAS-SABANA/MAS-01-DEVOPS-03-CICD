@@ -127,6 +127,36 @@ flowchart LR
 
 Ver detalle completo en [`diagrams/cicd-flow.md`](./diagrams/cicd-flow.md).
 
+### Evidencia de ejecución
+
+El flujo real de trabajo es: rama `feature/*` → Pull Request hacia `main` → merge. Cada push a un PR abierto dispara el CI vía el evento `pull_request` (no `push`, para evitar runs duplicados sobre el mismo commit):
+
+![Flujo de ramas: feature branch → PR → merge a main](images/git-branch-graph.png)
+
+El bot **sonarqubecloud** comenta directamente en el Pull Request el resultado del Quality Gate (issues nuevos, hotspots de seguridad, cobertura y duplicación sobre el código nuevo), y GitHub bloquea el botón de merge hasta que todos los checks — incluido ese — pasan:
+
+![PR #1 con comentario del bot sonarqubecloud: Quality Gate passed, y todos los checks en verde](images/ci-pr-quality-gate.png)
+
+Ese run se disparó por un evento `pull_request` de tipo **`synchronize`** (un push a una rama que ya tiene PR abierto) — exactamente el escenario que causaba runs duplicados antes de quitar `feature/**` del trigger `push` en `ci.yml`. Ejecuta Quality Gate → SonarQube + Snyk en paralelo. El job `Docker Build & Push` aparece omitido (ícono de círculo cortado) porque la condición `if` del job exige que el evento sea `push` a `main` — es decir, que ya haya merge:
+
+![Job graph del run disparado por el PR: Quality Gate, SonarQube y Snyk en verde, Docker omitido](images/ci-run-pr.png)
+
+Vista de la barra lateral del mismo run, confirmando el estado de cada job (`Docker Build & Push` con el ícono de omitido):
+
+![Barra lateral de jobs del run: Quality Gate, SonarQube Analysis y Snyk Security Scan con check verde, Docker Build & Push omitido](images/ci-run-pr-jobs-sidebar.png)
+
+Al hacer merge del PR, el push resultante a `main` dispara una **segunda** ejecución del mismo workflow — ahora sí con el evento `push` correcto:
+
+![Lista de runs: el disparado por el PR ya terminó, el disparado por el push a main tras el merge queda en progreso](images/actions-runs-list-merge.png)
+
+En esa segunda corrida el job `Docker Build & Push` sí se ejecuta, construye la imagen multi-stage y la publica en Docker Hub:
+
+![Job graph completo tras el merge: los cuatro jobs en verde, incluido Docker Build & Push, con el resumen del build](images/ci-run-merge-docker.png)
+
+Resultado final: la imagen publicada en Docker Hub con las tags generadas automáticamente por `docker/metadata-action` (SHA del commit, `main`, `latest`):
+
+![Repositorio santilp951/agents-arq en Docker Hub con las tags sha-6618c13, latest y main](images/dockerhub-tags.png)
+
 ---
 
 ## Pipeline CD – Jenkins
@@ -167,6 +197,14 @@ flowchart LR
 | Snyk | Dependencias npm: CVEs conocidos | Job CI paralelo a SonarQube |
 | Docker multi-stage | Imagen mínima sin devDeps ni código fuente | Build CI |
 | K8s security context | Usuario no-root, readOnlyRootFilesystem, no capabilities | Deploy CD |
+
+**SonarQube Cloud** — proyecto `MAS-SABANA_MAS-01-DEVOPS-03-CICD`, Quality Gate en verde, sin issues de seguridad ni bugs, 91% de cobertura y 0% de duplicación:
+
+![Dashboard de SonarQube Cloud: Quality Gate Passed, Security A, Reliability A, Maintainability A, 91% coverage](images/sonarcloud-dashboard.png)
+
+**Snyk** — el job de CI corre `snyk test` (gate que falla el build ante vulnerabilidades `high`/`critical`) y, solo en push a `main`, `snyk monitor`, que publica este snapshot en el dashboard: 97 dependencias analizadas, 0 issues encontrados:
+
+![Dashboard de Snyk: proyecto agents-arq, 0 issues, 97 dependencias, snapshot vía CI/CLI](images/snyk-dashboard.png)
 
 ---
 
@@ -224,8 +262,8 @@ Para correr el proyecto en local sin necesidad de un cluster ni de las herramien
 
 ```bash
 # Clonar e instalar dependencias
-git clone https://github.com/templatesSLA/agents-arq
-cd agents-arq
+git clone https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD
+cd MAS-01-DEVOPS-03-CICD
 npm ci
 
 # Validar el código antes de tocar nada
