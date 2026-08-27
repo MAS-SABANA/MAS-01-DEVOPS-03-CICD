@@ -1,6 +1,6 @@
 # agents-arq — Pipeline CI/CD con Seguridad y Monitoreo
 
-> **Repositorio:** [https://github.com/templatesSLA/agents-arq](https://github.com/templatesSLA/agents-arq)
+> **Repositorio:** [https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD](https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD)
 
 **Integrante:** Santiago López Amaya  
 **Curso:** Fundamentos de DevOps — Universidad de La Sabana · Unidad 3

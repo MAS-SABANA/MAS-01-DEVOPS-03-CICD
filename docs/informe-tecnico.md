@@ -1,6 +1,6 @@
 # Laboratorio Técnico — Pipeline CI/CD con Seguridad y Monitoreo
 
-**Repositorio:** [https://github.com/templatesSLA/agents-arq](https://github.com/templatesSLA/agents-arq)
+**Repositorio:** [https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD](https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD)
 
 **Integrante:** Santiago López Amaya  
 **Curso:** Fundamentos de DevOps — Universidad de La Sabana  
@@ -129,7 +129,7 @@ agents-arq/
 
 ```bash
 # 1. Clonar e instalar
-git clone https://github.com/templatesSLA/agents-arq && cd agents-arq
+git clone https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD && cd MAS-01-DEVOPS-03-CICD
 npm ci
 
 # 2. Validar calidad
