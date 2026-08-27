@@ -1,7 +1,6 @@
 # Actividad 4 – Pipeline CI/CD con Seguridad y Monitoreo
 
 > **Curso:** Fundamentos de DevOps – Unisabana
-
 > **Tema:** CI/CD, seguridad (SonarQube + Snyk) y monitoreo (Prometheus + Grafana)
 > **Stack:** Node.js 24 · Express · TypeScript · Docker · Kubernetes · GitHub Actions · Jenkins
 
