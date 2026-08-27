@@ -3,7 +3,7 @@
 > **Curso:** Fundamentos de DevOps – Unisabana
 
 > **Tema:** CI/CD, seguridad (SonarQube + Snyk) y monitoreo (Prometheus + Grafana)
-> **Stack:** Node.js 20 · Express · TypeScript · Docker · Kubernetes · GitHub Actions · Jenkins
+> **Stack:** Node.js 24 · Express · TypeScript · Docker · Kubernetes · GitHub Actions · Jenkins
 
 **Integrantes:**
 - Santiago López Amaya — santiagoloam@unisabana.edu.co

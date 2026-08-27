@@ -2,7 +2,7 @@
 # STAGE 1: Build
 # Compila TypeScript → JavaScript en un entorno completo de Node
 # ─────────────────────────────────────────────────────────────────────────────
-FROM node:20-alpine AS builder
+FROM node:24-alpine AS builder
 
 WORKDIR /app
 
@@ -22,7 +22,7 @@ RUN npm run build
 # STAGE 2: Runtime
 # Imagen final mínima — sin devDependencies, sin código fuente TypeScript
 # ─────────────────────────────────────────────────────────────────────────────
-FROM node:20-alpine AS runtime
+FROM node:24-alpine AS runtime
 
 # Metadatos OCI
 LABEL org.opencontainers.image.title="agents-arq" \
