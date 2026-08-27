@@ -4,10 +4,11 @@ import { app } from '../index';
 describe('GET /agents', () => {
   it('debería retornar la lista de agentes', async () => {
     const res = await request(app).get('/agents');
+    const body = res.body as { agents: unknown[]; total: number };
     expect(res.status).toBe(200);
     expect(res.body).toHaveProperty('agents');
-    expect(Array.isArray(res.body.agents)).toBe(true);
-    expect(res.body.total).toBeGreaterThan(0);
+    expect(Array.isArray(body.agents)).toBe(true);
+    expect(body.total).toBeGreaterThan(0);
   });
 
   it('debería retornar un agente específico por ID', async () => {

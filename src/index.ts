@@ -18,7 +18,8 @@ app.use((req: Request, res: Response, next: NextFunction): void => {
   const start = Date.now();
   res.on('finish', () => {
     const duration = (Date.now() - start) / 1000;
-    const route = req.route?.path ?? req.path;
+    const route: string =
+      (req as { route?: { path?: string } }).route?.path ?? req.path;
     httpRequestCounter.inc({
       method: req.method,
       route,
@@ -34,9 +35,14 @@ app.use('/health', healthRouter);
 app.use('/agents', agentsRouter);
 
 // Endpoint de métricas Prometheus
-app.get('/metrics', async (_req: Request, res: Response): Promise<void> => {
-  res.set('Content-Type', register.contentType);
-  res.end(await register.metrics());
+app.get('/metrics', (_req: Request, res: Response, next: NextFunction): void => {
+  register
+    .metrics()
+    .then((metrics) => {
+      res.set('Content-Type', register.contentType);
+      res.end(metrics);
+    })
+    .catch(next);
 });
 
 // Handler de error global
