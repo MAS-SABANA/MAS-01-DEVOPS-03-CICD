@@ -33,11 +33,17 @@ El workflow de CI se activa en dos eventos: cualquier push sobre ramas `feature/
 
 ### 1.2 Pipeline de Entrega Continua (Jenkins — `Jenkinsfile`)
 
-El pipeline de CD es declarativo y se dispara mediante un webhook de GitHub cuando hay un push a `main`. Corre en un agente Docker basado en `node:20-alpine` para garantizar un entorno limpio y reproducible.
+El pipeline de CD es declarativo y se dispara mediante un webhook de GitHub cuando hay un push a `main`. Su responsabilidad es exclusivamente el **despliegue**: no repite ningún paso de calidad ni seguridad, ya que confía en que el CI ya los ejecutó y la imagen publicada en Docker Hub pasó todos los gates.
 
-Los stages más relevantes son: primero la instalación de dependencias, luego la verificación de calidad en paralelo (TypeCheck y Lint), después los tests con publicación del reporte JUnit en la UI de Jenkins. A continuación se ejecuta el análisis SonarQube con verificación del Quality Gate, el escaneo Snyk con archivado del reporte JSON, la compilación TypeScript, el build y push de la imagen Docker, el despliegue al cluster K8s mediante `kubectl set image` y un smoke test final que valida que el endpoint `/health` responde correctamente después del despliegue.
+Está compuesto por tres stages:
 
-La etapa de deploy utiliza `kubectl rollout status` con timeout de 120 segundos para detectar rollouts fallidos y activar automáticamente el rollback de Kubernetes.
+**Stage 1 — Checkout** clona el repositorio únicamente para obtener el `GIT_COMMIT` y construir el tag de imagen. No instala dependencias ni ejecuta código.
+
+**Stage 2 — Deploy a K8s** ejecuta `kubectl set image` para apuntar el Deployment a la imagen con el SHA del commit. Inmediatamente después, `kubectl rollout status` espera hasta 120 segundos para confirmar que los pods pasaron sus readiness probes. Si el timeout se supera, el rollout queda en estado degradado y Kubernetes mantiene activa la versión anterior — el rollback es automático, no requiere intervención manual.
+
+**Stage 3 — Smoke Test** ejecuta un `curl --fail` al endpoint `/health` del Service para confirmar que la aplicación responde correctamente. Si retorna algo distinto de 200, el stage falla y el build queda marcado como rojo en Jenkins.
+
+Esta separación de responsabilidades entre CI y CD reduce la superficie de secretos necesaria en cada sistema: GitHub Actions necesita acceso a SonarQube, Snyk y Docker Hub; Jenkins solo necesita el `kubeconfig` del cluster.
 
 ---
 

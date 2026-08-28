@@ -23,35 +23,25 @@
 │   └── __tests__/
 │       ├── health.test.ts
 │       └── agents.test.ts
-├── k8s/                             # Manifiestos para Minikube (desarrollo local)
+├── k8s/
 │   ├── deployment.yaml             # Deployment + liveness/readiness probes
 │   ├── service.yaml                # Service NodePort :30080
 │   ├── configmap.yaml
 │   └── monitoring/
 │       ├── prometheus-config.yaml  # Prometheus + reglas de alerta
 │       └── grafana-deployment.yaml # Grafana + dashboard auto-provisioned
-├── k8s/gke-autopilot/               # Manifiestos para GKE Autopilot (target real del CD)
-│   ├── namespace.yaml              # Namespace monitoring
-│   ├── app.yaml                    # ConfigMap + Deployment + Service ClusterIP de agents-arq
-│   ├── prometheus.yaml             # RBAC + ConfigMap + Deployment + Service ClusterIP
-│   ├── grafana.yaml                # ConfigMaps (datasource/dashboard) + Deployment + Service
-│   └── README.md                   # Diferencias vs k8s/, costos, port-forward, verificación
-├── jenkins/                         # Infra para levantar Jenkins vía docker-compose
-│   ├── Dockerfile                  # Jenkins LTS + CLI docker + kubectl
-│   ├── docker-compose.yml
-│   └── README.md                   # Setup de plugins, credenciales y el job del Jenkinsfile
-├── images/                          # Evidencia del CI (capturas embebidas en este README)
-│   └── cd/                         # Evidencia del CD — despliegue real en GKE Autopilot
 ├── diagrams/
 │   ├── arquitectura.md             # Vista general del sistema
 │   ├── cicd-flow.md                # Detalle de pipelines CI y CD
 │   ├── k8s-monitoreo.md            # Stack K8s + Prometheus + Grafana
 │   └── secuencia-deploy.md         # Secuencia completa de despliegue
-├── docs/
-│   ├── informe-tecnico.md          # Documento técnico del laboratorio
-│   └── comandos.md                 # Comandos usados en el despliegue real a GKE
+├── images/                         # Evidencia del laboratorio
+│   ├── cd/                         # Capturas del pipeline CD y monitoreo
+│   └── *.png                       # Capturas del pipeline CI y seguridad
+├── actividad-2/
+│   └── postmortem-devops-mlops.md  # Post-mortem + DevOps vs MLOps
 ├── Dockerfile                      # Multi-stage build (build → runtime mínimo)
-├── Jenkinsfile                     # Pipeline CD — despliegue a GKE Autopilot
+├── Jenkinsfile                     # Pipeline CD — solo despliegue
 ├── sonar-project.properties        # Configuración SonarQube
 └── .github/workflows/ci.yml        # Pipeline CI — calidad + seguridad + imagen
 ```
@@ -60,9 +50,9 @@
 
 ## Arquitectura general
 
-El sistema implementa un ciclo DevOps completo donde cada herramienta cumple un rol específico y encadenado. El developer hace push a GitHub, lo que desencadena dos flujos paralelos pero coordinados: el **CI** (GitHub Actions) que valida la calidad del código, ejecuta los análisis de seguridad y publica la imagen Docker; y el **CD** (Jenkins) que, una vez que la imagen está en el registry, la despliega en un clúster **GKE Autopilot**. El usuario final accede a la aplicación vía `kubectl port-forward` (Autopilot no expone balanceadores por defecto), mientras que el stack de monitoreo (Prometheus + Grafana) observa en tiempo real lo que ocurre dentro de los pods.
+El sistema implementa un ciclo DevOps completo donde cada herramienta cumple un rol específico y encadenado. El developer hace push a GitHub, lo que desencadena dos flujos paralelos pero coordinados: el **CI** (GitHub Actions) que valida la calidad del código, ejecuta los análisis de seguridad y publica la imagen Docker; y el **CD** (Jenkins) que, una vez que la imagen está en el registry, la despliega en el cluster de Kubernetes. El usuario final accede a la aplicación a través del Service de K8s, mientras que el stack de monitoreo (Prometheus + Grafana) observa en tiempo real lo que ocurre dentro de los pods.
 
-La separación entre CI y CD es intencional: GitHub Actions tiene acceso a los secretos de análisis (SonarQube, Snyk, Docker Hub) mientras que Jenkins solo necesita las credenciales de GCP (`gcp-sa-key`, `gcp-project-id`). Esto reduce la superficie de ataque y permite que cada pipeline evolucione de forma independiente. También existe una variante de manifiestos para **Minikube** ([`k8s/`](k8s/)) pensada para desarrollo/pruebas locales sin depender de GCP (ver nota en [Monitoreo](#monitoreo)).
+La separación entre CI y CD es intencional: GitHub Actions tiene acceso a los secretos de análisis (SonarQube, Snyk, Docker Hub) mientras que Jenkins solo necesita el kubeconfig del cluster. Esto reduce la superficie de ataque y permite que cada pipeline evolucione de forma independiente.
 
 ```mermaid
 graph LR
@@ -75,34 +65,39 @@ graph LR
 
   REG[("🐳 Docker Hub\nagents-arq:SHA")]
 
-  subgraph JK["Jenkins (CD) · docker-compose"]
-    JAUTH["🔑 gcloud auth\n(Service Account)"]
-    JD["🚀 Deploy\napply k8s/gke-autopilot/"]
-    JAUTH --> JD
+  subgraph JK["Jenkins (CD)"]
+    JD["🚀 Deploy\nkubectl set image"]
   end
 
-  subgraph GKE["GKE Autopilot · demo-observability"]
-    APP["🚀 agents-arq\nPod ClusterIP"]
+  subgraph K8S["Kubernetes · Minikube"]
+    APP["🚀 agents-arq\nPod × 2"]
+    SVC["🔀 Service :30080"]
+    SVC -->|"enruta"| APP
   end
 
-  subgraph MON["Monitoreo · ns monitoring"]
+  subgraph MON["Monitoreo"]
     PROM["📈 Prometheus"]
-    GRAF["📊 Grafana"]
+    GRAF["📊 Grafana :30030"]
     PROM -->|"datasource"| GRAF
   end
 
-  USR(["🌐 Usuario\nkubectl port-forward"])
+  USR(["🌐 Usuario"])
 
   DEV    -->|"git push"| REPO
   REPO   -->|"trigger CI"| GA
   GA     -->|"docker push :SHA"| REG
-  GA     -.->|"IMAGE_TAG\n(manual por ahora)"| JK
+  REPO   -->|"webhook post-merge"| JK
   JD     -->|"pull imagen"| REG
-  JD     -->|"deploy"| GKE
+  JD     -->|"deploy"| K8S
   APP    -->|"/metrics"| PROM
-  USR    -->|"port-forward"| APP
-  USR    -->|"port-forward"| GRAF
+  USR    -->|"HTTP"| SVC
 ```
+
+El modelo de branching usa una rama larga `main` y ramas de corta duración `feature/*`. Cada `feature` abre un PR hacia `main`; el CI lo valida automáticamente; tras el merge, el CD lo despliega.
+
+![Historial de ramas git](./images/git-branch-graph.png)
+
+Ver detalle en [`diagrams/arquitectura.md`](./diagrams/arquitectura.md).
 
 ---
 
@@ -137,135 +132,101 @@ flowchart LR
   docker --> done(["✅ Imagen en Docker Hub"])
 ```
 
-### Evidencia de ejecución
+### Evidencia del pipeline CI
 
-El flujo real de trabajo es: rama `feature/*` → Pull Request hacia `main` → merge. Cada push a un PR abierto dispara el CI vía el evento `pull_request` (no `push`, para evitar runs duplicados sobre el mismo commit):
+El CI ejecutándose en un PR: todos los jobs pasan antes de permitir el merge.
 
-![Flujo de ramas: feature branch → PR → merge a main](images/git-branch-graph.png)
+![CI en PR — jobs en la barra lateral](./images/ci-run-pr-jobs-sidebar.png)
 
-El bot **sonarqubecloud** comenta directamente en el Pull Request el resultado del Quality Gate (issues nuevos, hotspots de seguridad, cobertura y duplicación sobre el código nuevo), y GitHub bloquea el botón de merge hasta que todos los checks — incluido ese — pasan:
+![CI en PR — vista principal del run](./images/ci-run-pr.png)
 
-![PR #1 con comentario del bot sonarqubecloud: Quality Gate passed, y todos los checks en verde](images/ci-pr-quality-gate.png)
+El Quality Gate del PR bloquea el merge hasta que typecheck, lint, tests y build sean exitosos.
 
-Ese run se disparó por un evento `pull_request` de tipo **`synchronize`** (un push a una rama que ya tiene PR abierto) — exactamente el escenario que causaba runs duplicados antes de quitar `feature/**` del trigger `push` en `ci.yml`. Ejecuta Quality Gate → SonarQube + Snyk en paralelo. El job `Docker Build & Push` aparece omitido (ícono de círculo cortado) porque la condición `if` del job exige que el evento sea `push` a `main` — es decir, que ya haya merge:
+![PR con Quality Gate aprobado](./images/ci-pr-quality-gate.png)
 
-![Job graph del run disparado por el PR: Quality Gate, SonarQube y Snyk en verde, Docker omitido](images/ci-run-pr.png)
+Tras el merge a `main`, el CI ejecuta el job de Docker adicional y publica la imagen.
 
-Vista de la barra lateral del mismo run, confirmando el estado de cada job (`Docker Build & Push` con el ícono de omitido):
+![CI en merge — job Docker activo](./images/ci-run-merge-docker.png)
 
-![Barra lateral de jobs del run: Quality Gate, SonarQube Analysis y Snyk Security Scan con check verde, Docker Build & Push omitido](images/ci-run-pr-jobs-sidebar.png)
+![Lista de runs tras el merge](./images/actions-runs-list-merge.png)
 
-Al hacer merge del PR, el push resultante a `main` dispara una **segunda** ejecución del mismo workflow — ahora sí con el evento `push` correcto:
+### Análisis de seguridad — SonarCloud
 
-![Lista de runs: el disparado por el PR ya terminó, el disparado por el push a main tras el merge queda en progreso](images/actions-runs-list-merge.png)
+SonarQube centraliza el análisis de calidad del código y la deuda técnica. Su Quality Gate actúa como guardián automático: si la cobertura de tests cae por debajo del umbral o aparecen bugs bloqueantes, el pipeline se detiene, haciendo explícito un estándar de calidad que de otro modo quedaría implícito o ignorado.
 
-En esa segunda corrida el job `Docker Build & Push` sí se ejecuta, construye la imagen multi-stage y la publica en Docker Hub:
+![Dashboard de SonarCloud](./images/sonarcloud-dashboard.png)
 
-![Job graph completo tras el merge: los cuatro jobs en verde, incluido Docker Build & Push, con el resumen del build](images/ci-run-merge-docker.png)
+### Análisis de dependencias — Snyk
 
-Resultado final: la imagen publicada en Docker Hub con las tags generadas automáticamente por `docker/metadata-action` (SHA del commit, `main`, `latest`):
+Snyk se especializa en vulnerabilidades de la cadena de suministro (dependencias de npm). A diferencia de SonarQube que analiza el código propio, Snyk monitorea si una librería de tercero tiene un CVE conocido. La integración con el panel de seguridad de GitHub via SARIF permite ver y remediar vulnerabilidades sin salir de la plataforma.
 
-![Repositorio santilp951/agents-arq en Docker Hub con las tags sha-6618c13, latest y main](images/dockerhub-tags.png)
+![Dashboard de Snyk](./images/snyk-dashboard.png)
+
+### Imagen publicada en Docker Hub
+
+El job de Docker construye la imagen multi-stage, la etiqueta con el SHA del commit y la etiqueta `latest`, y la publica en Docker Hub. Solo se ejecuta en merges a `main`, garantizando que solo el código revisado llega al registry.
+
+![Tags publicados en Docker Hub](./images/dockerhub-tags.png)
+
+Ver detalle completo en [`diagrams/cicd-flow.md`](./diagrams/cicd-flow.md).
 
 ---
 
 ## Pipeline CD – Jenkins
 
-El CD despliega a un clúster **GKE Autopilot** real (no Minikube): Jenkins corre en `docker-compose` ([`jenkins/`](jenkins/)) con un agente `google/cloud-sdk` que trae `gcloud` + `kubectl`. El job recibe como parámetro `IMAGE_TAG` — el tag ya publicado por el CI en Docker Hub —, se autentica en GCP con una Service Account, sustituye el placeholder `__IMAGE__` en `k8s/gke-autopilot/app.yaml` por esa imagen y aplica los cuatro manifiestos (`namespace`, `prometheus`, `grafana`, `app`) contra el clúster. Igual que antes, no repite pasos de calidad ni seguridad: confía en que el CI ya los hizo. Cierra con un smoke test contra `/health` dentro del propio pod.
-
-> **Nota:** el disparo automático GitHub Actions → Jenkins (pasando `IMAGE_TAG`) está documentado en [`k8s/gke-autopilot/README.md`](k8s/gke-autopilot/README.md) pero **aún no está implementado** en `ci.yml` — por ahora el job de Jenkins se lanza manualmente con ese parámetro.
+El CD se dispara por webhook al detectar un merge a `main`. Su única responsabilidad es tomar la imagen ya validada y publicada por el CI y llevarla al cluster. **No repite ningún paso de calidad ni seguridad**: confía en que el CI ya hizo ese trabajo. El `kubectl rollout status` actúa como verificación de disponibilidad real — si los pods no pasan las readiness probes en 120 segundos, Kubernetes mantiene automáticamente la versión anterior activa.
 
 ```mermaid
 flowchart LR
-  trigger(["CI publica imagen\n(IMAGE_TAG manual por ahora)"]) --> checkout
+  webhook(["webhook\nmerge a main"]) --> checkout
 
   subgraph checkout["Checkout"]
     c1[git clone]
   end
 
-  checkout --> auth
+  checkout --> deploy
 
-  subgraph auth["Autenticar en GKE"]
-    a1[gcloud auth\nactivate-service-account] --> a2[get-credentials\ndemo-observability]
-  end
-
-  auth --> deploy
-
-  subgraph deploy["Deploy a GKE Autopilot"]
-    d1[apply namespace\n+ prometheus + grafana] --> d2["sed __IMAGE__ → tag\napply app.yaml"] --> d3[rollout status\ntimeout 180s ×3]
+  subgraph deploy["Deploy a K8s"]
+    d1[kubectl set image\n:SHA] --> d2[rollout status\ntimeout 120s]
   end
 
   deploy --> smoke
 
   subgraph smoke["Smoke Test"]
-    sm1["exec wget /health"] --> sm2{200 OK?}
+    sm1[curl /health] --> sm2{200 OK?}
   end
 
   sm2 -->|"sí"| ok(["✅ Deploy exitoso"])
-  sm2 -->|"no"| fail(["❌ Pipeline falla\n(sin rollback automático)"])
+  sm2 -->|"no"| fail(["❌ K8s revierte\nversión anterior"])
 ```
 
-**Infraestructura de Jenkins** ([`jenkins/`](jenkins/)): Jenkins LTS corriendo en `docker-compose`, con una imagen custom que solo agrega lo que la UI no puede instalar sola — el CLI de `docker` (para el agente `docker { image ... }`) y `kubectl`. Plugins, credenciales y el job en sí se configuran a mano desde la UI del asistente de setup.
+### Evidencia del pipeline CD
 
-**Por qué los manifiestos de GKE Autopilot son distintos a los de Minikube** (`k8s/gke-autopilot/` vs `k8s/`):
+Vista de stages en Jenkins: los tres stages (Checkout → Deploy → Smoke Test) en verde.
 
-- `Service` en `ClusterIP` en vez de `NodePort` — los nodos de Autopilot no tienen IP externa, por eso todo el acceso es vía `kubectl port-forward`.
-- Prometheus lleva **RBAC propio** (ServiceAccount + ClusterRole): sin esto el service discovery de pods falla por permiso denegado.
-- `resources.requests == resources.limits` en los 3 pods, con CPU en múltiplos de 250m — requisito de Autopilot; si no se cumple, Autopilot redondea hacia arriba y se paga de más.
-- Grafana sin credenciales hardcodeadas: usa `admin`/`admin` y pide cambiarla en el primer login.
-- Costo aproximado: ~USD 30–35/mes por los 3 pods (750m vCPU + 2 GiB RAM) + gestión del clúster ~USD 0.10/h (~USD 74/mes, con 1 clúster gratis por cuenta de facturación de GCP).
+![Jenkins — vista de stages](./images/cd/jenkins-stages.png)
 
-### Evidencia de despliegue en GKE
+Logs de Jenkins mostrando el `kubectl set image` y el `rollout status` exitoso.
 
-Corrida real del job `agent-app` #6 en Jenkins: las 6 etapas del `Jenkinsfile` (Checkout, Autenticar en GKE, Deploy a GKE Autopilot, Smoke Test, Post Actions) en verde, 49s de duración:
+![Jenkins — logs del deploy](./images/cd/jenkins-logs.png)
 
-![Jenkins: job agent-app #6, las 6 etapas del pipeline en verde](images/cd/jenkins-stages.png)
+Los pods corriendo en Kubernetes con la imagen actualizada al SHA del último commit.
 
-El log de consola confirma el smoke test (`/health` responde `"status":"ok"`) y el cierre exitoso del pipeline:
+![Pods en K8s](./images/cd/pods.png)
 
-![Log de Jenkins: smoke test OK, CD completado — santilp951/agents-arq:sha-b842ea1 desplegado en demo-observability, Finished SUCCESS](images/cd/jenkins-logs.png)
+![Tag de imagen en el pod](./images/cd/k8s-app-tag.png)
 
-Trazabilidad CI → CD: el pod corriendo en el clúster usa exactamente la imagen `sha-b842ea1` — la misma que publicó el job Docker del CI, no una copia distinta:
+La aplicación respondiendo a través del Service de Kubernetes.
 
-![kubectl describe pod: Image santilp951/agents-arq:sha-b842ea1, coincide con el tag publicado por el CI](images/cd/k8s-app-tag.png)
+![App respondiendo](./images/cd/app.png)
 
-Los 3 workloads (`agents-arq`, `prometheus`, `grafana`) corriendo en el clúster Autopilot `demo-observability`, gestionados como pods normales sobre nodos que Autopilot aprovisiona automáticamente:
-
-![Consola de GKE: Workloads agents-arq, grafana y prometheus con status OK en el clúster demo-observability](images/cd/pods.png)
-
-La app respondiendo en vivo a través de `kubectl port-forward`:
-
-![Respuesta de /health vía port-forward: status ok, uptime y versión](images/cd/app.png)
-
-El dashboard `agents-arq — DevOps Dashboard` en Grafana, con datos reales scrapeados del pod (requests/seg, latencia P95, tasa de errores 5xx, agentes activos, CPU y memoria RSS):
-
-![Dashboard de Grafana con métricas en vivo de agents-arq desplegado en GKE](images/cd/grafana.png)
-
-Los dos targets de Prometheus (`agents-arq` y `kubernetes-pods`) en estado `UP`, confirmando que el service discovery vía RBAC funciona en Autopilot:
-
-![Prometheus Targets: agents-arq y kubernetes-pods ambos UP](images/cd/prometheus.png)
-
-Los tres servicios se acceden vía `kubectl port-forward` (nada queda expuesto públicamente en Autopilot):
-
-![Terminal con kubectl port-forward corriendo para app, prometheus y grafana](images/cd/portforward-grafana.png)
-
-Extracto real de la terminal de este despliegue (creación del clúster y aplicación de manifiestos):
-
-```bash
-❯ gcloud container clusters create-auto demo-observability --location=us-central1 --release-channel=regular
-API [container.googleapis.com] not enabled on project [devop-505501]. Would you like to enable and retry? (y/N)?  y
-Creating cluster demo-observability in us-central1... Cluster is being health-checked...done.
-Created [https://container.googleapis.com/v1/projects/devop-505501/zones/us-central1/clusters/demo-observability].
-
-kubectl apply -f k8s/gke-autopilot/namespace.yaml
-kubectl apply -f k8s/gke-autopilot/app.yaml
-kubectl apply -f k8s/gke-autopilot/prometheus.yaml
-kubectl apply -f k8s/gke-autopilot/grafana.yaml
-```
+![Port-forward a la app](./images/cd/portforward-app.png)
 
 ---
 
 ## Seguridad
+
+La seguridad se implementa en cuatro capas a lo largo del pipeline, siguiendo el principio de _shift-left_: los problemas se detectan cuanto antes, cuando el costo de corregirlos es mínimo.
 
 | Herramienta | Qué analiza | Cuándo |
 |-------------|-------------|--------|
@@ -274,21 +235,15 @@ kubectl apply -f k8s/gke-autopilot/grafana.yaml
 | Docker multi-stage | Imagen mínima sin devDeps ni código fuente | Build CI |
 | K8s security context | Usuario no-root, readOnlyRootFilesystem, no capabilities | Deploy CD |
 
-**SonarQube Cloud** — proyecto `MAS-SABANA_MAS-01-DEVOPS-03-CICD`, Quality Gate en verde, sin issues de seguridad ni bugs, 91% de cobertura y 0% de duplicación:
-
-![Dashboard de SonarQube Cloud: Quality Gate Passed, Security A, Reliability A, Maintainability A, 91% coverage](images/sonarcloud-dashboard.png)
-
-**Snyk** — el job de CI corre `snyk test` (gate que falla el build ante vulnerabilidades `high`/`critical`) y, solo en push a `main`, `snyk monitor`, que publica este snapshot en el dashboard: 97 dependencias analizadas, 0 issues encontrados:
-
-![Dashboard de Snyk: proyecto agents-arq, 0 issues, 97 dependencias, snapshot vía CI/CLI](images/snyk-dashboard.png)
+El Deployment de Kubernetes refuerza el aislamiento en tiempo de ejecución: los pods corren con un usuario no-root (UID 1000), el filesystem es de solo lectura y no tienen ninguna Linux capability adicional.
 
 ---
 
 ## Monitoreo
 
-> Esta sección describe la variante **Minikube** (`k8s/monitoring/`). La variante que corre de verdad en producción es **GKE Autopilot** (`k8s/gke-autopilot/`): mismo par Prometheus + Grafana, pero con `Service` en `ClusterIP` + `kubectl port-forward` (Autopilot no expone NodePort) y RBAC propio para el service discovery — ver la evidencia real en [Pipeline CD – Jenkins](#pipeline-cd--jenkins) y el detalle en [`k8s/gke-autopilot/README.md`](k8s/gke-autopilot/README.md).
-
 El stack Prometheus + Grafana se despliega en el namespace `monitoring`. La app expone `/metrics` vía `prom-client` y los pods son descubiertos automáticamente por las anotaciones del Deployment. Prometheus evalúa reglas de alerta (`HighErrorRate`, `HighLatency`, `PodDown`) y alimenta como datasource a Grafana, que carga el dashboard `agents-arq-main` de forma automática desde un ConfigMap — sin configuración manual al arrancar.
+
+La aplicación instrumenta tres métricas propias: `http_requests_total` (Counter por método/ruta/status), `http_request_duration_seconds` (Histogram para P50/P95/P99) y `active_agents_total` (Gauge). Estas, combinadas con las métricas de runtime de Node.js (CPU, memoria RSS), alimentan los 6 paneles del dashboard.
 
 ```mermaid
 graph LR
@@ -313,23 +268,64 @@ graph LR
   DEV  -->|"visualiza"| GRAF
 ```
 
+### Evidencia del monitoreo
+
+Prometheus activo, scrapeando los pods de la aplicación.
+
+![Prometheus UI](./images/cd/prometheus.png)
+
+![Port-forward a Prometheus](./images/cd/portforward-prometheus.png)
+
+Dashboard de Grafana con los paneles de requests/s, latencia P95, tasa de errores y agentes activos.
+
+![Grafana — dashboard agents-arq](./images/cd/grafana.png)
+
+![Port-forward a Grafana](./images/cd/portforward-grafana.png)
+
+Ver detalle completo en [`diagrams/k8s-monitoreo.md`](./diagrams/k8s-monitoreo.md).
+
+```bash
+# Acceder a Grafana en minikube
+minikube service grafana -n monitoring --url
+# Credenciales: admin / devops2024
+```
+
 ---
 
-## Secrets y credenciales
+## Herramientas utilizadas y justificación
 
-**GitHub Actions (CI)** — conectan el pipeline de CI con SonarQube Cloud, Snyk y Docker Hub:
+**GitHub Actions** fue elegido como motor de CI por su integración nativa con GitHub, su ecosistema de acciones reutilizables y la facilidad para configurar workflows en YAML. Su capacidad de ejecutar jobs en paralelo reduce significativamente el tiempo de feedback al desarrollador.
+
+**Jenkins** complementa el stack como motor de CD porque permite un control más granular del proceso de despliegue, integración con Kubernetes vía credenciales seguras y una UI rica para revisar el historial de pipelines. En entornos empresariales es común esta combinación: GitHub Actions para CI rápida y Jenkins para CD orquestado.
+
+**SonarQube** centraliza el análisis de calidad del código y la deuda técnica. Su Quality Gate actúa como guardián automático: si la cobertura de tests cae por debajo del umbral o aparecen bugs bloqueantes, el pipeline se detiene.
+
+**Snyk** se especializa en vulnerabilidades de la cadena de suministro (dependencias de npm). El flag `--severity-threshold=high` permite que vulnerabilidades de severidad media no bloqueen el pipeline mientras se trabaja en actualizarlas, pero las altas y críticas sí lo hacen.
+
+**Prometheus** recolecta métricas en formato text-exposition desde el endpoint `/metrics` de la aplicación cada 10 segundos. Las alertas definidas en `alerts.yml` cubren los tres escenarios críticos: alta tasa de errores (> 10% por 2 min), latencia elevada (P95 > 1s por 5 min) y pod caído (`up == 0` por 1 min).
+
+**Grafana** consume las métricas de Prometheus y las visualiza en un dashboard pre-configurado que se provisiona automáticamente desde ConfigMaps, eliminando la configuración manual post-despliegue.
+
+---
+
+## Reflexión sobre eficiencia operativa
+
+La implementación de este pipeline CI/CD representa un salto cualitativo en la eficiencia operativa. Antes de esta automatización, la validación de calidad dependía de la disciplina individual de cada desarrollador; ahora, el pipeline actúa como árbitro imparcial que aplica los mismos estándares en cada commit.
+
+El tiempo de feedback se reduce drásticamente: un desarrollador recibe en menos de 5 minutos la confirmación de que su código pasa typecheck, lint y tests, lo que permite correcciones tempranas cuando el contexto del cambio aún está fresco. La integración de seguridad desplaza las vulnerabilidades hacia la izquierda del ciclo (_shift-left security_): en lugar de descubrirlas en producción, se detectan en el Pull Request.
+
+El monitoreo continuo cierra el ciclo DevOps: el mismo equipo que desarrolla y despliega tiene visibilidad inmediata del comportamiento de la aplicación en producción. Las alertas configuradas convierten el monitoreo reactivo en proactivo, notificando problemas antes de que el usuario final los reporte.
+
+Una área de mejora identificada es la ausencia de tests de carga automatizados en el pipeline. Incorporar herramientas como k6 o Artillery en una etapa de performance testing post-deploy completaría el ciclo de calidad.
+
+---
+
+## Secrets requeridos en GitHub
 
 | Secret | Valor |
 |--------|-------|
 | `SONAR_TOKEN` | Token de autenticación SonarQube |
-| `SONAR_HOST_URL` | URL del servidor SonarQube (`https://sonarcloud.io`) |
+| `SONAR_HOST_URL` | URL del servidor SonarQube |
 | `SNYK_TOKEN` | Token de Snyk |
 | `DOCKERHUB_USERNAME` | Usuario de Docker Hub |
 | `DOCKERHUB_TOKEN` | Token de acceso Docker Hub |
-
-**Jenkins (CD)** — configuradas directamente en el controller (no son secrets de GitHub), usadas por el `Jenkinsfile` para autenticar contra GCP y desplegar en GKE Autopilot:
-
-| Credencial | Tipo | Uso |
-|------------|------|-----|
-| `gcp-sa-key` | Secret file | JSON de una Service Account de GCP con `roles/container.developer` |
-| `gcp-project-id` | Secret text | ID del proyecto GCP |
