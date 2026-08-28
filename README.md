@@ -40,6 +40,8 @@
 │   ├── Dockerfile                  # Jenkins LTS + CLI docker + kubectl
 │   ├── docker-compose.yml
 │   └── README.md                   # Setup de plugins, credenciales y el job del Jenkinsfile
+├── images/                          # Evidencia del CI (capturas embebidas en este README)
+│   └── cd/                         # Evidencia del CD — despliegue real en GKE Autopilot
 ├── diagrams/
 │   ├── arquitectura.md             # Vista general del sistema
 │   ├── cicd-flow.md                # Detalle de pipelines CI y CD
@@ -47,8 +49,7 @@
 │   └── secuencia-deploy.md         # Secuencia completa de despliegue
 ├── docs/
 │   ├── informe-tecnico.md          # Documento técnico del laboratorio
-│   ├── comandos.md                 # Comandos usados en el despliegue real a GKE
-│   └── images/                     # Evidencia del despliegue en GKE Autopilot
+│   └── comandos.md                 # Comandos usados en el despliegue real a GKE
 ├── Dockerfile                      # Multi-stage build (build → runtime mínimo)
 ├── Jenkinsfile                     # Pipeline CD — despliegue a GKE Autopilot
 ├── sonar-project.properties        # Configuración SonarQube
@@ -61,7 +62,7 @@
 
 El sistema implementa un ciclo DevOps completo donde cada herramienta cumple un rol específico y encadenado. El developer hace push a GitHub, lo que desencadena dos flujos paralelos pero coordinados: el **CI** (GitHub Actions) que valida la calidad del código, ejecuta los análisis de seguridad y publica la imagen Docker; y el **CD** (Jenkins) que, una vez que la imagen está en el registry, la despliega en un clúster **GKE Autopilot**. El usuario final accede a la aplicación vía `kubectl port-forward` (Autopilot no expone balanceadores por defecto), mientras que el stack de monitoreo (Prometheus + Grafana) observa en tiempo real lo que ocurre dentro de los pods.
 
-La separación entre CI y CD es intencional: GitHub Actions tiene acceso a los secretos de análisis (SonarQube, Snyk, Docker Hub) mientras que Jenkins solo necesita las credenciales de GCP (`gcp-sa-key`, `gcp-project-id`). Esto reduce la superficie de ataque y permite que cada pipeline evolucione de forma independiente. También existe una variante de manifiestos para **Minikube** ([`k8s/`](k8s/)) pensada para desarrollo/pruebas locales sin depender de GCP — ver [Desarrollo local](#desarrollo-local).
+La separación entre CI y CD es intencional: GitHub Actions tiene acceso a los secretos de análisis (SonarQube, Snyk, Docker Hub) mientras que Jenkins solo necesita las credenciales de GCP (`gcp-sa-key`, `gcp-project-id`). Esto reduce la superficie de ataque y permite que cada pipeline evolucione de forma independiente. También existe una variante de manifiestos para **Minikube** ([`k8s/`](k8s/)) pensada para desarrollo/pruebas locales sin depender de GCP (ver nota en [Monitoreo](#monitoreo)).
 
 ```mermaid
 graph LR
@@ -103,8 +104,6 @@ graph LR
   USR    -->|"port-forward"| GRAF
 ```
 
-Ver detalle en [`diagrams/arquitectura.md`](./diagrams/arquitectura.md) — nota: ese diagrama aún describe la variante Minikube; el diagrama de arriba refleja el despliegue real a GKE Autopilot.
-
 ---
 
 ## Pipeline CI – GitHub Actions
@@ -137,8 +136,6 @@ flowchart LR
 
   docker --> done(["✅ Imagen en Docker Hub"])
 ```
-
-Ver detalle completo en [`diagrams/cicd-flow.md`](./diagrams/cicd-flow.md).
 
 ### Evidencia de ejecución
 
@@ -208,31 +205,63 @@ flowchart LR
   sm2 -->|"no"| fail(["❌ Pipeline falla\n(sin rollback automático)"])
 ```
 
-Para levantar el propio Jenkins ver [`jenkins/README.md`](jenkins/README.md) (setup de plugins, credenciales `gcp-sa-key` / `gcp-project-id` y el job apuntando al `Jenkinsfile`). Para el detalle de los manifiestos de GKE (RBAC de Prometheus, `resources` ajustados a los requisitos de Autopilot, costos aproximados) ver [`k8s/gke-autopilot/README.md`](k8s/gke-autopilot/README.md).
+**Infraestructura de Jenkins** ([`jenkins/`](jenkins/)): Jenkins LTS corriendo en `docker-compose`, con una imagen custom que solo agrega lo que la UI no puede instalar sola — el CLI de `docker` (para el agente `docker { image ... }`) y `kubectl`. Plugins, credenciales y el job en sí se configuran a mano desde la UI del asistente de setup.
+
+**Por qué los manifiestos de GKE Autopilot son distintos a los de Minikube** (`k8s/gke-autopilot/` vs `k8s/`):
+
+- `Service` en `ClusterIP` en vez de `NodePort` — los nodos de Autopilot no tienen IP externa, por eso todo el acceso es vía `kubectl port-forward`.
+- Prometheus lleva **RBAC propio** (ServiceAccount + ClusterRole): sin esto el service discovery de pods falla por permiso denegado.
+- `resources.requests == resources.limits` en los 3 pods, con CPU en múltiplos de 250m — requisito de Autopilot; si no se cumple, Autopilot redondea hacia arriba y se paga de más.
+- Grafana sin credenciales hardcodeadas: usa `admin`/`admin` y pide cambiarla en el primer login.
+- Costo aproximado: ~USD 30–35/mes por los 3 pods (750m vCPU + 2 GiB RAM) + gestión del clúster ~USD 0.10/h (~USD 74/mes, con 1 clúster gratis por cuenta de facturación de GCP).
 
 ### Evidencia de despliegue en GKE
 
+Corrida real del job `agent-app` #6 en Jenkins: las 6 etapas del `Jenkinsfile` (Checkout, Autenticar en GKE, Deploy a GKE Autopilot, Smoke Test, Post Actions) en verde, 49s de duración:
+
+![Jenkins: job agent-app #6, las 6 etapas del pipeline en verde](images/cd/jenkins-stages.png)
+
+El log de consola confirma el smoke test (`/health` responde `"status":"ok"`) y el cierre exitoso del pipeline:
+
+![Log de Jenkins: smoke test OK, CD completado — santilp951/agents-arq:sha-b842ea1 desplegado en demo-observability, Finished SUCCESS](images/cd/jenkins-logs.png)
+
+Trazabilidad CI → CD: el pod corriendo en el clúster usa exactamente la imagen `sha-b842ea1` — la misma que publicó el job Docker del CI, no una copia distinta:
+
+![kubectl describe pod: Image santilp951/agents-arq:sha-b842ea1, coincide con el tag publicado por el CI](images/cd/k8s-app-tag.png)
+
 Los 3 workloads (`agents-arq`, `prometheus`, `grafana`) corriendo en el clúster Autopilot `demo-observability`, gestionados como pods normales sobre nodos que Autopilot aprovisiona automáticamente:
 
-![Consola de GKE: Workloads agents-arq, grafana y prometheus con status OK en el clúster demo-observability](docs/images/pods.png)
+![Consola de GKE: Workloads agents-arq, grafana y prometheus con status OK en el clúster demo-observability](images/cd/pods.png)
 
 La app respondiendo en vivo a través de `kubectl port-forward`:
 
-![Respuesta de /health vía port-forward: status ok, uptime y versión](docs/images/app.png)
+![Respuesta de /health vía port-forward: status ok, uptime y versión](images/cd/app.png)
 
 El dashboard `agents-arq — DevOps Dashboard` en Grafana, con datos reales scrapeados del pod (requests/seg, latencia P95, tasa de errores 5xx, agentes activos, CPU y memoria RSS):
 
-![Dashboard de Grafana con métricas en vivo de agents-arq desplegado en GKE](docs/images/grafana.png)
+![Dashboard de Grafana con métricas en vivo de agents-arq desplegado en GKE](images/cd/grafana.png)
 
 Los dos targets de Prometheus (`agents-arq` y `kubernetes-pods`) en estado `UP`, confirmando que el service discovery vía RBAC funciona en Autopilot:
 
-![Prometheus Targets: agents-arq y kubernetes-pods ambos UP](docs/images/prometheus.png)
+![Prometheus Targets: agents-arq y kubernetes-pods ambos UP](images/cd/prometheus.png)
 
 Los tres servicios se acceden vía `kubectl port-forward` (nada queda expuesto públicamente en Autopilot):
 
-![Terminal con kubectl port-forward corriendo para app, prometheus y grafana](docs/images/portforward-grafana.png)
+![Terminal con kubectl port-forward corriendo para app, prometheus y grafana](images/cd/portforward-grafana.png)
 
-Comandos completos usados en este despliegue real: [`docs/comandos.md`](docs/comandos.md).
+Extracto real de la terminal de este despliegue (creación del clúster y aplicación de manifiestos):
+
+```bash
+❯ gcloud container clusters create-auto demo-observability --location=us-central1 --release-channel=regular
+API [container.googleapis.com] not enabled on project [devop-505501]. Would you like to enable and retry? (y/N)?  y
+Creating cluster demo-observability in us-central1... Cluster is being health-checked...done.
+Created [https://container.googleapis.com/v1/projects/devop-505501/zones/us-central1/clusters/demo-observability].
+
+kubectl apply -f k8s/gke-autopilot/namespace.yaml
+kubectl apply -f k8s/gke-autopilot/app.yaml
+kubectl apply -f k8s/gke-autopilot/prometheus.yaml
+kubectl apply -f k8s/gke-autopilot/grafana.yaml
+```
 
 ---
 
@@ -284,92 +313,23 @@ graph LR
   DEV  -->|"visualiza"| GRAF
 ```
 
-Ver detalle completo en [`diagrams/k8s-monitoreo.md`](./diagrams/k8s-monitoreo.md).
-
-```bash
-# Acceder a Grafana en minikube
-minikube service grafana -n monitoring --url
-# Credenciales: admin / devops2024
-```
-
 ---
 
-## Desarrollo local
+## Secrets y credenciales
 
-Para correr el proyecto en local sin necesidad de un cluster ni de las herramientas de CI/CD:
-
-**Requisitos previos**
-
-| Herramienta | Versión mínima |
-|-------------|----------------|
-| Node.js | 24+ |
-| Docker | 24+ |
-| kubectl | 1.28+ |
-| Minikube | cualquiera |
-
-**Levantar la app en modo desarrollo**
-
-```bash
-# Clonar e instalar dependencias
-git clone https://github.com/MAS-SABANA/MAS-01-DEVOPS-03-CICD
-cd MAS-01-DEVOPS-03-CICD
-npm ci
-
-# Validar el código antes de tocar nada
-npm run typecheck
-npm run lint
-npm run test        # incluye cobertura
-
-# Levantar con hot-reload (ts-node)
-npm run dev
-# → http://localhost:3000/health
-# → http://localhost:3000/metrics
-# → http://localhost:3000/agents
-```
-
-**Levantar con Docker (simula producción)**
-
-```bash
-docker build -t agents-arq:local .
-docker run --rm -p 3000:3000 agents-arq:local
-
-# Verificar que el health check del contenedor responde
-curl http://localhost:3000/health
-```
-
-**Desplegar en Minikube con monitoreo**
-
-```bash
-minikube start
-
-# Crear namespace de monitoreo y aplicar manifiestos
-kubectl create namespace monitoring
-kubectl apply -f k8s/
-kubectl apply -f k8s/monitoring/
-
-# Verificar que los pods están corriendo
-kubectl get pods
-kubectl get pods -n monitoring
-
-# Acceder a la app
-minikube service agents-arq --url
-
-# Acceder a Grafana (admin / devops2024)
-minikube service grafana -n monitoring --url
-```
-
-**Alternativa: desplegar en GKE Autopilot (target real del CD)**
-
-Requiere cuenta de GCP. Ver guía completa en [`k8s/gke-autopilot/README.md`](k8s/gke-autopilot/README.md) — creación del clúster, `sed` del placeholder `__IMAGE__`, port-forward y costos aproximados. Para correr Jenkins localmente y disparar el `Jenkinsfile` contra ese clúster, ver [`jenkins/README.md`](jenkins/README.md).
-
----
-
-## Secrets requeridos en GitHub
+**GitHub Actions (CI)** — conectan el pipeline de CI con SonarQube Cloud, Snyk y Docker Hub:
 
 | Secret | Valor |
 |--------|-------|
 | `SONAR_TOKEN` | Token de autenticación SonarQube |
-| `SONAR_HOST_URL` | URL del servidor SonarQube |
+| `SONAR_HOST_URL` | URL del servidor SonarQube (`https://sonarcloud.io`) |
 | `SNYK_TOKEN` | Token de Snyk |
 | `DOCKERHUB_USERNAME` | Usuario de Docker Hub |
 | `DOCKERHUB_TOKEN` | Token de acceso Docker Hub |
+
+**Jenkins (CD)** — configuradas directamente en el controller (no son secrets de GitHub), usadas por el `Jenkinsfile` para autenticar contra GCP y desplegar en GKE Autopilot:
+
+| Credencial | Tipo | Uso |
+|------------|------|-----|
+| `gcp-sa-key` | Secret file | JSON de una Service Account de GCP con `roles/container.developer` |
+| `gcp-project-id` | Secret text | ID del proyecto GCP |
